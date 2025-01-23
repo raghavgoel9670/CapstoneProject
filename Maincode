@@ -1,0 +1,150 @@
+import io
+from google.colab import files
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.preprocessing import StandardScaler
+from sklearn.utils.class_weight import compute_class_weight
+from sklearn.model_selection import StratifiedKFold
+from imblearn.over_sampling import SMOTE
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.metrics import ConfusionMatrixDisplay
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+# Step 1: Load Data
+data = files.upload()  # This will prompt you to upload your file
+df = pd.read_csv(io.BytesIO(data['Finals.csv']), encoding='latin-1')
+
+
+# Step 2: Data Cleaning and Preprocessing
+df.columns = [
+    'Timestamp', 'Age_Group', 'Gender', 'Education', 'Income', 'Aware_Sust_Pkg',
+    'EA_Q1', 'EA_Q2', 'EA_Q3', 'EA_Q4', 'EA_Q5', 'EA_Q6',  # Environmental Awareness
+    'PPQ_Q1', 'PPQ_Q2', 'PPQ_Q3', 'PPQ_Q4', 'PPQ_Q5',      # Perceived Product Quality
+    'BT_Q1', 'BT_Q2', 'BT_Q3', 'BT_Q4', 'BT_Q5', 'BT_Q6',  # Brand Trust
+    'WTP_Q1', 'WTP_Q2', 'WTP_Q3'                           # Likelihood to Pay Premium for Sustainable Packaging
+]
+
+# Filter data for respondents aware of sustainable packaging
+df = df[df['Aware_Sust_Pkg'] == 'Yes']
+
+# Convert categorical variables to numerical (one-hot encoding)
+categorical_cols = ['Age_Group', 'Gender', 'Education', 'Income']
+df = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
+
+# Create Dependent Variable (Likelihood to Pay Premium)
+df['Likelihood_to_Pay'] = np.where(df[['WTP_Q1', 'WTP_Q2', 'WTP_Q3']].mean(axis=1) >= 4, 1, 0)
+
+# Create Independent Variables (Mean scores)
+df['Env_Aware_Score'] = df[['EA_Q1', 'EA_Q2', 'EA_Q3', 'EA_Q4', 'EA_Q5', 'EA_Q6']].mean(axis=1)
+df['PPQ_Score'] = df[['PPQ_Q1', 'PPQ_Q2', 'PPQ_Q3', 'PPQ_Q4', 'PPQ_Q5']].mean(axis=1)
+df['BT_Score'] = df[['BT_Q1', 'BT_Q2', 'BT_Q3', 'BT_Q4', 'BT_Q5', 'BT_Q6']].mean(axis=1)
+
+
+# Step 3: Descriptive Analytics
+# Display summary statistics for the key independent variables and dependent variable
+print("Descriptive Statistics:")
+print(df[['Env_Aware_Score', 'PPQ_Score', 'BT_Score', 'Likelihood_to_Pay']].describe())
+
+# Visualize distributions of key variables
+plt.figure(figsize=(14, 8))
+sns.histplot(df['Env_Aware_Score'], kde=True, color='skyblue', label='Environmental Awareness', bins=15)
+sns.histplot(df['PPQ_Score'], kde=True, color='lightgreen', label='Perceived Product Quality', bins=15)
+sns.histplot(df['BT_Score'], kde=True, color='orange', label='Brand Trust', bins=15)
+plt.title('Distributions of Key Variables')
+plt.legend()
+plt.show()
+
+# Step 3: Feature Engineering - Use only significant features
+X = df[['Env_Aware_Score', 'PPQ_Score', 'BT_Score'] + list(df.filter(like='Age_Group_')) ]
+y = df['Likelihood_to_Pay']
+
+# Step 4: Train-Test Split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=100)
+
+# Step 5: Scaling features (StandardScaler for Logistic Regression)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# Compute class weights to handle class imbalance
+class_weights = compute_class_weight('balanced', classes=np.array([0, 1]), y=y_train)
+weights = dict(zip([0, 1], class_weights))
+
+# Step 6: Apply SMOTE to balance the training data (Fine-tuned SMOTE with k_neighbors=3)
+smote = SMOTE(random_state=42, k_neighbors=3)
+X_train_balanced, y_train_balanced = smote.fit_resample(X_train_scaled, y_train)
+
+# Step 7: Hyperparameter tuning using GridSearchCV (More extensive range of values)
+param_grid = {
+    'C': [0.01, 0.1, 1, 10, 100],  # Regularization strength (lower values for stronger regularization)
+    'solver': ['liblinear', 'saga'],  # Solver options (saga is efficient for larger datasets)
+    'max_iter': [100, 200, 300, 500],  # Increase iterations to ensure convergence
+}
+log_reg = LogisticRegression(class_weight=weights)
+grid_search = GridSearchCV(log_reg, param_grid, cv=StratifiedKFold(n_splits=5), scoring='accuracy')
+grid_search.fit(X_train_balanced, y_train_balanced)
+
+# Best parameters found from GridSearchCV
+print(f"Best Parameters: {grid_search.best_params_}")
+
+# Step 8: Refit Logistic Regression Model with best parameters
+best_model = grid_search.best_estimator_
+
+# Step 9: Evaluate Model
+y_pred = best_model.predict(X_test_scaled)
+
+# Confusion Matrix and Classification Report
+print("Confusion Matrix:\n", confusion_matrix(y_test, y_pred))
+print("\nClassification Report:\n", classification_report(y_test, y_pred))
+
+# Coefficients and Odds Ratios
+coefficients = pd.DataFrame({
+    'Variable': X.columns,
+    'Coefficient': best_model.coef_[0],
+    'Odds_Ratio': np.exp(best_model.coef_[0])
+})
+print("\nLogistic Regression Coefficients and Odds Ratios:\n", coefficients)
+
+# Step 10: Save Results to CSV
+coefficients.to_csv('logistic_regression_results.csv', index=False)
+
+# After model training, constructing the Logistic Regression Equation
+equation = f"Logit(P) = {best_model.intercept_[0]:.4f}"
+
+# Only add the selected variables to the equation
+for feature, coef in zip(['Env_Aware_Score', 'BT_Score', 'PPQ_Score'] + list(df.filter(like='Age_Group_').columns), best_model.coef_[0]):
+    equation += f" + ({coef:.4f}) * {feature}"
+
+# Print the Logistic Regression Equation
+print("\nLogistic Regression Equation:")
+print(equation)
+
+# Plot the confusion matrix
+disp = ConfusionMatrixDisplay(confusion_matrix=confusion_matrix(y_test, y_pred), display_labels=best_model.classes_)
+disp.plot(cmap='Blues')
+plt.title('Confusion Matrix Heatmap')
+plt.show()
+
+# Plot Odds Ratios
+coefficients.sort_values('Odds_Ratio', ascending=False, inplace=True)
+plt.figure(figsize=(10, 6))
+sns.barplot(x='Odds_Ratio', y='Variable', data=coefficients, palette='viridis')
+plt.title('Odds Ratios of Predictors')
+plt.xlabel('Odds Ratio')
+plt.ylabel('Variable')
+plt.show()
+
+
+# Check for multicollinearity (optional)
+vif = pd.DataFrame()
+vif['Variable'] = X.columns
+# Convert X.values to float before calculating VIF
+vif['VIF'] = [variance_inflation_factor(X.astype(float).values, i) for i in range(X.shape[1])]
+print("\nVariance Inflation Factor (VIF) values:\n", vif)
+
+# Download Results
+files.download('logistic_regression_results.csv')
